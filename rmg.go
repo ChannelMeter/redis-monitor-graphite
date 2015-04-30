@@ -29,6 +29,7 @@ func (c *conf) setFlags() {
 	defaultRedis := "localhost:6379"
 	defaultInterval := "10s"
 	defaultPrefix := "redis.$host"
+	defaultDaemon := false
 	if e := os.Getenv("GRAPHITE_HOST"); e != "" {
 		defaultGraphite = e
 	}
@@ -41,12 +42,15 @@ func (c *conf) setFlags() {
 	if e := os.Getenv("MONITOR_PREFIX"); e != "" {
 		defaultPrefix = e
 	}
+	if e := os.Getenv("MONITOR_DAEMON"); e != "" {
+		defaultDaemon = true
+	}
 
 	flag.StringVar(&(c.GraphiteHost), "graphite", defaultGraphite, "Grahite Host Url (host:port)")
 	flag.StringVar(&(c.RedisHost), "redis", defaultRedis, "Redis Instance (host:port,host:port,host:port...)")
 	flag.StringVar(&(c.Interval), "interval", defaultInterval, "Metrics send interval (only valid if daemon = true)")
 	flag.StringVar(&(c.Prefix), "prefix", defaultPrefix, "Metrics prefix")
-	flag.BoolVar(&(c.Daemon), "daemon", false, "Daemonize and report every [interval] seconds")
+	flag.BoolVar(&(c.Daemon), "daemon", defaultDaemon, "Daemonize and report every [interval] seconds")
 }
 
 func (c *conf) GetPrefix(Host string) string {
@@ -81,21 +85,10 @@ func (g *GraphiteReporter) Report(cfg *conf, host string, stats RedisStats) {
 		for section, values := range stats {
 			sectionPrefix := strings.ToLower(section) + "."
 			switch section {
-			case "Clients", "Memory", "Persistence", "Stats":
+			case "Clients", "Memory", "Persistence", "Stats", "Keyspace":
 				for name, metricValue := range values {
 					metricName := prefix + sectionPrefix + name
 					report(metricName, metricValue)
-				}
-			case "Keyspace":
-				for db, value := range values {
-					dbPrefix := sectionPrefix + db + "."
-					vars := strings.Split(value, ",")
-					for _, v := range vars {
-						if val := strings.Split(v, "="); len(val) == 2 {
-							metricName := prefix + dbPrefix + val[0]
-							report(metricName, val[1])
-						}
-					}
 				}
 			}
 		}
@@ -113,6 +106,7 @@ func QueryStats(host string) RedisStats {
 			lines := strings.Split(stats, "\r\n")
 			rs := RedisStats(make(map[string]map[string]string))
 			var wg map[string]string
+			var section string
 			for _, l := range lines {
 				if len(l) == 0 {
 					wg = nil
@@ -121,16 +115,28 @@ func QueryStats(host string) RedisStats {
 					k := strings.TrimSpace(strings.TrimPrefix(l, "#"))
 					wg = make(map[string]string)
 					rs[k] = wg
+					section = k
 				} else if wg != nil {
 					if values := strings.Split(l, ":"); len(values) == 2 {
-						if _, err := strconv.ParseFloat(values[1], 64); err == nil {
-							switch values[0] {
-							case "redis_git_sha1", "redis_git_dirty", "redis_build_id", "arch_bits",
-								"process_id", "tcp_port", "aof_enabled":
-								// don't report these metrics
-								continue
-							default:
-								wg[values[0]] = values[1]
+						if section == "Keyspace" {
+							csv := strings.Split(values[1], ",")
+							for _, query := range csv {
+								if kvs := strings.Split(query, "="); len(kvs) == 2 {
+									if _, err := strconv.ParseFloat(kvs[1], 64); err == nil {
+										wg[values[0]+"."+kvs[0]] = kvs[1]
+									}
+								}
+							}
+						} else {
+							if _, err := strconv.ParseFloat(values[1], 64); err == nil {
+								switch values[0] {
+								case "redis_git_sha1", "redis_git_dirty", "redis_build_id", "arch_bits",
+									"process_id", "tcp_port", "aof_enabled":
+									// don't report these metrics
+									continue
+								default:
+									wg[values[0]] = values[1]
+								}
 							}
 						}
 					}
